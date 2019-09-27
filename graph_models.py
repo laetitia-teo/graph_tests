@@ -4,8 +4,8 @@ import matplotlib.pyplot as plt
 import torch
 import torch.nn.functional as F
 
-from torch.nn import Sequential as Seq, Linear as Lin, ReLU
-from torch.nn import Sigmoid, BatchNorm1d
+from torch.nn import Sequential, Linear, ReLU
+from torch.nn import Sigmoid, LayerNorm, Dropout
 
 from torch_geometric.data import Data
 from torch_scatter import scatter_mean
@@ -16,27 +16,23 @@ from torch_geometric.nn import MetaLayer
 #                               MLP function                                  #
 #                                                                             #
 ###############################################################################
-def mlp_fn(num_layers, h):
+def mlp_fn(hidden_layer_sizes):
     def mlp(f_in, f_out):
         """
         This function returns a Multi-Layer Perceptron with ReLU non-linearities
         with num_layers layers and h hidden nodes in each layer, with f_in input
         features and f_out output features.
         """
-        if num_layers < 1:
-            raise AttributeError('Number of hidden layers must be at least one')
-        f1 = f_in
-        f2 = h
         layers = []
-        for i in range(num_layers):
-            layers.append(Lin(f1, f2))
+        f1 = f_in
+        for f2 in hidden_layer_sizes:
+            layers.append(Linear(f1, f2))
             layers.append(ReLU())
-            f1 = h
-        f2 = f_out
-        layers.append(Lin(f1, f2))
-        layers.append(BatchNorm1d(f2))
-        layers.append(Sigmoid())
-        return Seq(*layers)
+            f1 = f2
+        layers.append(Linear(f1, f_out))
+        # layers.append(ReLU())
+        layers.append(LayerNorm(f_out))
+        return Sequential(*layers)
     return mlp
 
 ###############################################################################
@@ -283,19 +279,32 @@ class EncodeProcessDecode(torch.nn.Module):
                  N=10):
         super(EncodeProcessDecode, self).__init__()
         f_e, f_x, f_u, f_e_out, f_x_out, f_u_out = self.get_args(f_dict)
-        model_fn = mlp_fn(num_layers, h)
+        model_fn = mlp_fn([h])
         print(model_fn)
         self.N = N
-        self.encoder = MetaLayer(DirectEdgeModel(f_e, model_fn),
-                                 DirectNodeModel(f_x, model_fn),
-                                 DirectGlobalModel(f_u, model_fn))
+
+        self.encoder = MetaLayer(
+            DirectEdgeModel(f_e, model_fn, h),
+            DirectNodeModel(f_x, model_fn, h),
+            DirectGlobalModel(f_u, model_fn))
+
         # input to the Core is twice as long to account for concatenation
-        self.core = MetaLayer(EdgeModel(2*f_e, 2*f_x, 2*f_u, model_fn, f_e),
-                              NodeModel(f_e, 2*f_x, 2*f_u, model_fn, f_x),
-                              GlobalModel(f_e, f_x, 2*f_u, model_fn, f_u))
-        self.decoder = MetaLayer(DirectEdgeModel(f_e, model_fn, f_e_out),
-                                 DirectNodeModel(f_x, model_fn, f_x_out),
-                                 DirectGlobalModel(f_u, model_fn, f_u_out))
+        self.core = MetaLayer(
+            EdgeModel(2*h, 2*h, 2*f_u, model_fn, h),
+            NodeModel(h, 2*h, 2*f_u, model_fn, h),
+            GlobalModel(h, h, 2*f_u, model_fn, f_u))
+
+        self.decoder = MetaLayer(
+            DirectEdgeModel(h, model_fn, h),
+            DirectNodeModel(h, model_fn, h),
+            DirectGlobalModel(f_u, model_fn, f_u))
+
+        model_fn = Linear
+
+        self.transform = MetaLayer(
+            DirectEdgeModel(h, model_fn, f_e_out),
+            DirectNodeModel(h, model_fn, f_x_out),
+            DirectGlobalModel(f_u, model_fn, f_u_out))
 
     def get_args(self, f_dict):
         f_e, f_x, f_u = f_dict['f_e'], f_dict['f_x'], f_dict['f_u']
@@ -316,9 +325,9 @@ class EncodeProcessDecode(torch.nn.Module):
     def forward(self, x, edge_index, edge_attr, u, batch):
         # first encode the graph with the direct models
         x, edge_attr, u = self.encoder(x, edge_index, edge_attr, u, batch)
-        x_h = torch.zeros(x.shape)
-        edge_attr_h = torch.zeros(edge_attr.shape)
-        u_h = torch.zeros(u.shape)
+        x_h = x
+        edge_attr_h = edge_attr
+        u_h = u
         
         for i in range(self.N):
             x_cat = torch.cat([x, x_h], 1)
@@ -329,5 +338,8 @@ class EncodeProcessDecode(torch.nn.Module):
             x_h, edge_attr_h, u_h = \
                 self.core(x_cat, edge_index, edge_attr_cat, u_cat, batch)
 
-        return self.decoder(x_h, edge_index, edge_attr_h, u_h, batch)
+            x_decoded, edge_attr_decoded, y_decoded = self.decoder(
+                x_h, edge_index, edge_attr_h, u_h, batch)
+
+        return self.transform(x_h, edge_index, edge_attr_h, u_h, batch)
 
