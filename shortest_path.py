@@ -105,7 +105,7 @@ def generate_graph(rand,
     # Put all distance weights into edge attributes.
     for i, j in combined_graph.edges():
         combined_graph.get_edge_data(i, j).setdefault(DISTANCE_WEIGHT_NAME,
-                                                      istances[i, j])
+                                                      distances[i, j])
     return combined_graph, mst_graph, geo_graph
 
 
@@ -574,7 +574,7 @@ class GraphPlotter(object):
 seed = 1  #@param{type: 'integer'}
 rand = np.random.RandomState(seed=seed)
 
-num_examples = 32  #@param{type: 'integer'}
+num_examples = 15  #@param{type: 'integer'}
 # Large values (1000+) make trees. Try 20-60 for good non-trees.
 theta = 20  #@param{type: 'integer'}
 num_nodes_min_max = (16, 17)
@@ -594,6 +594,8 @@ input_graphs, target_graphs, graphs = generate_networkx_graphs(
 #     coll = plotter.draw_graph_with_solution()
 
 # plt.show()
+
+num_examples = 32
 
 ###############################################################################
 
@@ -628,7 +630,7 @@ def from_nx(g):
         x.append(int(node['end']))
         X.append(x)
 
-            sol_X.append([node['solution']])
+        sol_X.append([node['solution']])
     edge_index = []
     edge_attr = []
     sol_edge = []
@@ -649,25 +651,129 @@ def from_nx(g):
 
     return data, sol
 
-def compute_accuracy(pred, true):
+def compute_accuracy(pred, true_class):
     """
-    Computes accuracy over two lists, one with probabilities, the other with
-    booleans.
-    """
-    pred = pred.detach().cpu().numpy()
-    true = np.array(true.detach().cpu().numpy(), dtype=bool)
-    pred = pred >= 0.5
-    accurate = np.logical_not(np.logical_xor(pred, true))[0]
-    return (sum(accurate) / len(pred))
+    Computes accuracy of predicted data with the true classes. The arguments
+    are expected to be detached from the computation graph.
 
-def compute_is_correct(pred, true):
+    Arguments :
+        - pred : a float tensor of size [N, 2] with scores for the first class
+            ('not on shortest path') and the second class ('on shortest path')
+        - true_class : a long tensor of size [N] with the true classes for each
+            node.
     """
-    Returns one if all the elements match, 0 otherwhise.
+    pred_class = (pred.T[1] >= pred.T[0]).long()
+    accurate = np.logical_not(np.logical_xor(pred_class, true_class))
+    return sum(accurate.float()) / len(accurate)
+
+def all_correct(pred, true):
     """
-    pred = np.array(pred)
-    pred = pred >= 0.5
-    accurate = np.logical_not(np.logical_xor(pred, true))
-    return np.prod(accurate)
+    Returns one if all the elements match, 0 otherwhise. The arguments are
+    expected to be detached from the computation graph.
+
+    Arguments :
+        - pred : a float tensor of size [N, 2] with scores for the first class
+            ('not on shortest path') and the second class ('on shortest path')
+        - true_class : a long tensor of size [N] with the true classes for each
+            node.
+    """
+    pred_class = (pred.T[1] >= pred.T[0]).long()
+    accurate = np.logical_not(np.logical_xor(pred_class, true_class))
+    return accurate.all()
+
+def validation(models, num_nodes_min_max, n_valid, seed=42):
+    """
+    Validation procedure for a list of models.
+    
+    Validating consitsts in assessing accuracy for graphs as a function of the
+    number of nodes. The validation, for each model and each number of nodes,
+    is done on n_valid samples.
+    A second procedure is investigating the role of the number of message-
+    passing runs on accuracy. 
+    Along with mean accuracy, the proportion of completely solved graphs is 
+    also recorded.
+
+    Arguments :
+        - models : list of models to evaluate
+        - num_nodes_min_max : integer tuple, specifying the the range of node
+            number for the randomly generated graphs for evaluation.
+        - n_valid : the number of graphs, for each node number, on which
+            to perform validation.
+    """
+    acc_stats_allmodels = []
+    corr_stats_allmodels = []
+    theta = 20
+    min_nodes, max_nodes = num_nodes_min_max
+    for model in models:
+        acc_stats = []
+        corr_stats = []
+        for nodes in range(min_nodes, max_nodes + 1):
+            _, _, graphs = generate_networkx_graphs(
+                seed,
+                n_valid,
+                (nodes, nodes+1),
+                theta)
+            accuracies = []
+            corrects = []
+            graphs = list(map(from_nx, graphs))
+            for g, sol in graphs:
+                x = g.x
+                edge_attr = g.edge_attr
+                edge_index = g.edge_index
+                u = g.y
+                batch = torch.zeros(len(x), dtype=torch.long)
+                output = model(
+                    x, edge_index, edge_attr, u, batch)
+                
+                true_class = sol.x.long()[:, 0]
+                pred = output[-1].detach()
+                accuracy = compute_accuracy(pred, true_class)
+                correct = float(all_correct(pred, true_class))
+                accuracies.append(accuracy)
+                corrects.append(correct)
+            # mean and other stats
+            mean_acc = sum(accuracies) / len(accuracies)
+            mean_correct = sum(corrects) / len(corrects)
+            acc_stats.append(mean_acc)
+            corr_stats.append(mean_correct)
+        acc_stats_allmodels.append(acc_stats)
+        corr_stats_allmodels.append(corr_stats)
+    return acc_stats_allmodels, corr_stats_allmodels
+
+
+def save_models(models, path, prefix):
+    """
+    Saves a list of models (their state_dict). All the models are assumed to
+    have the same architecture, which is specified in a small text file 
+    accompanying the models.
+
+    The function creates a specific directory with the name 'prefix', which is
+    also pre-pended to the model name.
+    """
+    # save model description
+    descr = models[0].__repr__()
+    with open(op.join(path, prefix, 'descr.txt')) as f:
+        f.write(descr)
+    # save models
+    for i, model in enumerate(models):
+        name = prefix + '_model_' + str(i) + '.pt'
+        save_path = op.join(path, prefix, name)
+        torch.save(model.state_dict(), save_path)
+
+def load_models(path, prefix):
+    """
+    Loads a list of models saved with the save_models function.
+    """
+    model = EncodeProcessDecode(f_dict)
+
+
+def plot_graphs(list_of_lists):
+    """
+    Plots the graph of the time series generated by the training process.
+    """
+    for l in list_of_lists:
+        plt.plot(l)
+    plt.show()
 
 pyg = list(map(from_nx, graphs))
 
@@ -713,11 +819,11 @@ cross_entropy = CrossEntropyLoss()
 
 S = len(pyg) + 1
 
-def one_pass(e, model, optimizer, train=True):
+def one_pass(e, model, optimizer, graphs, train=True):
     optimizer.zero_grad()
     loss = 0
     acc = 0
-    for g, sol in pyg:
+    for g, sol in graphs:
 
         # get data
         x = g.x
@@ -729,10 +835,15 @@ def one_pass(e, model, optimizer, train=True):
         # predict and compare
         # x_pred is class scores for classes : 'does not lie on shortest path'
         # or 'lies on shortest path'
-        x_pred, edge_attr_pred, y_pred = model(
+        # output is a list of predictions, one for each step of preocessing
+        output = model(
             x, edge_index, edge_attr, u, batch)
         true_class = sol.x.long()[:, 0]
-        loss_x = cross_entropy(x_pred, true_class)
+        loss_x = 0.
+        for x_pred, _, _ in output:
+            loss_x += cross_entropy(x_pred, true_class)
+        # normalize by graph size
+        loss_x /= len(x)
         # acc += compute_accuracy(x_pred, sol.x) / S
         # loss_e = cross_entropy(edge_attr_pred, sol.edge_attr.float())
         # loss_x /= S
@@ -760,6 +871,12 @@ list_of_models = []
 
 random_seeds = np.arange(20)
 
+# different regimes for curriculum learning
+training_regimes = [
+    (3, 4), (3, 5), (4, 6), (5, 9), (8, 13), (10, 17), (16, 18)]
+
+regime_steps = [100, 200, 300, 500, 1000, 1000, 1000]
+
 def run():
     try:
         for i, seed in enumerate(random_seeds):
@@ -775,33 +892,42 @@ def run():
             # name = 'model' + str(i) + '_initial.pt'
             # torch.save(model.state_dict(), op.join('saves', name))
 
-            for epoch in range(nb_epochs):
-                loss, acc = one_pass(epoch, model, optimizer)
-                losses.append(loss)
-                accuracies.append(acc)
+            # for epoch in range(nb_epochs):
+            for j in range(len(regime_steps)):
+                nb_epochs = regime_steps[j]
+                for epoch in range(nb_epochs):
+                    _, _, graphs = generate_networkx_graphs(
+                        seed,
+                        num_examples,
+                        training_regimes[j],
+                        theta)
+                    graphs = list(map(from_nx, graphs))
+                    loss, acc = one_pass(epoch, model, optimizer, graphs)
+                    losses.append(loss)
+                    accuracies.append(acc)
 
             # name = 'model' + str(i) + '_' + str(nb_epochs) + '.pt'
             # torch.save(model.state_dict(), op.join('saves', name))
 
-            for g, sol in pyg:
-                x = g.x
-                print(g.x)
-                edge_attr = g.edge_attr
-                edge_index = g.edge_index
-                u = g.y
-                batch = torch.tensor(np.zeros(len(x)), dtype=torch.long)
+            # for g, sol in pyg:
+            #     x = g.x
+            #     print(g.x)
+            #     edge_attr = g.edge_attr
+            #     edge_index = g.edge_index
+            #     u = g.y
+            #     batch = torch.tensor(np.zeros(len(x)), dtype=torch.long)
 
-                x, _, _ = model(x, edge_index, edge_attr, u, batch)
+            #     x, _, _ = model(x, edge_index, edge_attr, u, batch)
 
-                print(x)
-                print(sol.x)
+            #     print(x)
+            #     print(sol.x)
 
             list_of_losses.append(losses)
             list_of_accuracies.append(accuracies)
             list_of_models.append(model)
-except KeyboardInterrupt:
-    list_of_losses.append(losses)
-    list_of_models.append(model)
+    except KeyboardInterrupt:
+        list_of_losses.append(losses)
+        list_of_models.append(model)
 
     print('Done ! Hope it worked all right for you.')
 

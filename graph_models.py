@@ -323,6 +323,9 @@ class EncodeProcessDecode(torch.nn.Module):
         return f_e, f_x, f_u, f_e_out, f_x_out, f_u_out
 
     def forward(self, x, edge_index, edge_attr, u, batch):
+        # the output is a list of outputs, one for each processing step
+        output = []
+
         # first encode the graph with the direct models
         x, edge_attr, u = self.encoder(x, edge_index, edge_attr, u, batch)
         x_h = x
@@ -335,11 +338,26 @@ class EncodeProcessDecode(torch.nn.Module):
             u_cat = torch.cat([u, u_h], 1)
             # batch_cat = torch.cat([batch, batch])
 
-            x_h, edge_attr_h, u_h = \
-                self.core(x_cat, edge_index, edge_attr_cat, u_cat, batch)
+            x_h, edge_attr_h, u_h = self.core(
+                x_cat,
+                edge_index,
+                edge_attr_cat,
+                u_cat,
+                batch)
 
             x_decoded, edge_attr_decoded, y_decoded = self.decoder(
-                x_h, edge_index, edge_attr_h, u_h, batch)
+                x_h,
+                edge_index,
+                edge_attr_h,
+                u_h,
+                batch)
 
-        return self.transform(x_h, edge_index, edge_attr_h, u_h, batch)
+            output.append(self.transform(
+                x_decoded,
+                edge_index,
+                edge_attr_decoded,
+                y_decoded,
+                batch))
+
+        return output
 
